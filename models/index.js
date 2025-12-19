@@ -1,6 +1,6 @@
 // models/index.js
 import VM from './VM.js';
-import Task from './Task.js';
+import BuildJobs from './BuildJobs.js';
 import AuditLog from './AuditLog.js';
 import Deployments from './Deployment.js';
 import DomainMapping from './DomainMapping.js';
@@ -13,7 +13,6 @@ import Integrations from './Integrations.js';
 
 export {
   VM,
-  Task,
   AuditLog,
   Deployments,
   DomainMapping,
@@ -23,4 +22,5 @@ export {
   UsageMetric,
   VMLog,
   Integrations,
+  BuildJobs
 };

@@ -1,9 +1,14 @@
-//  controllers/deployment.controller.js
+//  root/controllers/deployment.controller.js
 import axios from "axios";
-import {Deployments, Integrations} from '../models/index.js'
+import {BuildJobs, Deployments, Integrations} from '../models/index.js'
 import { asyncHandler } from "../utils/asyncHandler.js";
 import validateDeploymentPayload from "../utils/validatePayload.js";
-import mongoose from "mongoose";
+import os from 'os'
+import { exec } from "child_process";
+import { promisify } from "util";
+import fs from 'fs'
+import path from 'path';   
+const execAsync = promisify(exec);
 // services/githubIntegration.service.js
 
 export const getGithubTokenForUser = async (userId) => {
@@ -208,9 +213,9 @@ export const deploy = asyncHandler(async (req, res) => {
     });
   }
 
-  const newDeployment = new Deployments({
+  const newDeployment = await Deployments.create({
     userId: req?.user?.id,
-    status: "DRAFT",
+    status: "QUEUED",
     config: {
       appType: req.body.appType,
       source: {
@@ -225,29 +230,155 @@ export const deploy = asyncHandler(async (req, res) => {
     },
   });
 
-  // ✅ await the save
-  const savedDeployment = await newDeployment.save();
-  console.log("savedDeployment", savedDeployment._id);
-
   // ✅ access values from config
   const deploymentSpec = {
-    image: null,
-    repo: savedDeployment.config.source.repo,
-    branch: savedDeployment.config.source.branch,
-    runtime: savedDeployment.config.runtime,
-    startCommand: savedDeployment.config.startCommand,
-    cpu: savedDeployment.config.computeSize === "small" ? 256 : 512,
-    memory: savedDeployment.config.computeSize === "small" ? 512 : 1024,
-    env: {
-      NODE_ENV: "production",
-      PORT: 5000,
-    },
-  };
+  image: null,
+  repo: newDeployment.config.source.repo,
+  branch: newDeployment.config.source.branch,
+  runtime: newDeployment.config.runtime,
+  startCommand: newDeployment.config.startCommand,
+  cpu: newDeployment.config.computeSize === "small" ? 256 : 512,
+  memory: newDeployment.config.computeSize === "small" ? 512 : 1024,
+  env: {
+    NODE_ENV: "production",
+    PORT: 5000,
+  },
+};
 
-  console.log("deploymentSpec", deploymentSpec);
+const buildJob = await BuildJobs.create({
+  deploymentId: newDeployment._id,
+  status: "PENDING",
+  spec: deploymentSpec,
+});
+
+
+  workerLoop()
 
   return res.status(200).json({
     message: "deployment queued",
-    deploymentId: savedDeployment._id,
+    deploymentId: newDeployment._id,
   });
 });
+
+
+
+
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+async function workerLoop() {
+  while (true) {
+    const job = await BuildJobs.findOneAndUpdate(
+      { status: "PENDING" },
+      { status: "RUNNING", startedAt: new Date() },
+      { new: true }
+    );
+
+    if (!job) {
+      await sleep(3000);
+      continue;
+    }
+
+    try {
+      await runBuild(job);   // clone → build → push (later)
+
+      await Deployments.updateOne(
+  { _id: job.deploymentId },
+  { status: "BUILDING_IMAGE" }
+);
+
+      job.status = "SUCCESS";
+      job.finishedAt = new Date();
+      await job.save();
+
+      await Deployments.updateOne(
+        { _id: job.deploymentId },
+        { status: "DEPLOYING" }
+      );
+
+    } catch (err) {
+      job.status = "FAILED";
+      job.error = err.message;
+      await job.save();
+
+      await Deployments.updateOne(
+        { _id: job.deploymentId },
+        { status: "FAILED", error: err.message }
+      );
+    }
+  }
+}
+
+
+
+
+async function runBuild(job) {
+  const deployment = await Deployments.findById(job.deploymentId);
+  if (!deployment) throw new Error("Deployment not found");
+
+  const { repo, branch } = deployment.config.source;
+  const { runtime, startCommand } = deployment.config;
+
+  const buildDir = path.join(
+  os.tmpdir(),
+  `axeiro-build-${job._id}`
+);
+
+if (!fs.existsSync(buildDir)) {
+  fs.mkdirSync(buildDir, { recursive: true });
+}
+
+  await exec(`git clone --branch ${branch} https://github.com/${repo}.git ${buildDir}`);
+
+  const dockerfilePath = path.join(buildDir, "Dockerfile");
+
+  if (!fs.existsSync(dockerfilePath)) {
+    await generateDockerfile({
+      runtime,
+      startCommand,
+      output: dockerfilePath,
+    });
+  }
+
+  const imageTag = `axeiro/${deployment._id}:latest`;
+
+  await exec(`
+    /kaniko/executor \
+      --context ${buildDir} \
+      --dockerfile ${dockerfilePath} \
+      --destination ${imageTag}
+  `);
+
+  job.image = imageTag;
+  job.spec.image = imageTag;
+  job.markModified("spec");
+  job.save()
+
+//   job.spec = {
+//   ...job.spec,
+//   image: imageTag,
+// };
+}
+
+function generateDockerfile({ runtime, startCommand, output }) {
+  if (!runtime.startsWith("nodejs")) {
+    throw new Error(`Unsupported runtime: ${runtime}`);
+  }
+
+  const dockerfile = `
+FROM node:18-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install --production
+
+COPY . .
+
+EXPOSE 5000
+
+CMD ["sh", "-c", "${startCommand}"]
+`;
+
+  fs.writeFileSync(output, dockerfile.trim());
+}

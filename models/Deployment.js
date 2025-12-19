@@ -50,17 +50,3 @@ const DeploymentSchema = new mongoose.Schema(
 );
 
 export default mongoose.model("Deployments", DeploymentSchema);
-
-// const deploymentSpec = {
-//   image: null,
-//   repo: payload.source.repo,
-//   branch: payload.source.branch,
-//   runtime: payload.runtime,
-//   startCommand: payload.startCommand,
-//   cpu: payload.computeSize === "small" ? 256 : 512,
-//   memory: payload.computeSize === "small" ? 512 : 1024,
-//   env: {
-//     NODE_ENV: "production",
-//     PORT: 3000,
-//   },
-// };
